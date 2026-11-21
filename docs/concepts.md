@@ -88,7 +88,7 @@ the memory, faster to scan, with a small accuracy cost that must be measured.
 
 Go's mechanism for calling C (and C++ through a [C ABI](#c-abi)). Each call costs roughly 100 ns,
 which is negligible here, but it complicates builds (needs a C++ toolchain, and the binary must
-match the target system's C library; see the README's [Known risks](../README.md#known-risks)).
+match the target system's C library; see [Known risks](architecture.md#known-risks)).
 
 ### C ABI
 

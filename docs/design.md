@@ -679,7 +679,7 @@ spikes 1.2–1.3. Revisited with measurements in plan step 7.6; the engine's por
 
 Final models (from evals), Cognito passwordless free-tier check, prompt caching support per
 provider, Groq limits and data-use terms. See the README's
-[Open decisions](../README.md#open-decisions).
+[Open decisions](architecture.md#open-decisions).
 
 ## 13. AWS accounts and DNS
 
@@ -717,7 +717,7 @@ state it can destroy.
 ## 14. Frontend
 
 Plain HTML and JavaScript (ES modules, no framework, no npm packages) in `web/`, styled with the
-Tailwind v4 standalone CLI ([README](../README.md#frontend-conventions) has the conventions).
+Tailwind v4 standalone CLI ([architecture](architecture.md#frontend-conventions) has the conventions).
 Plan Phase 4 builds it.
 
 - **Served:** locally `make dev` serves `web/` at `/`, on the same address as `/chat`, so no CORS
