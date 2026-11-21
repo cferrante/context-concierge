@@ -1,39 +1,95 @@
-# Context Concierge (agentic RAG)
+# Context Concierge
 
-> **Status: paused (2026-11-16) while the portfolio site at `cferrante.dev` goes live; it will
-> run there as a feature ([design §15](docs/design.md#15-running-as-a-feature-of-cferrantedev)).**
->
-> **Built and evaluated locally; not deployed yet.** Phases 0–6.3 of the
-> [plan](docs/plan.md) are done: AWS risk spikes, the C++ retrieval engine, the Go orchestrator,
-> the split-pane UI, real models (Groq with a Bedrock fallback, Titan embeddings), a golden
-> question set with a retrieval gate in CI, and an answer judge checked against hand labels.
-> Next is the adversarial suite (6.4), then a private deploy on AWS (Phase 7). See
-> [Progress](#progress) for what is measured and what is still a target.
->
-> The design spec is in [docs/design.md](docs/design.md), the build order in
-> [docs/plan.md](docs/plan.md), targets and measured results in
-> [docs/benchmarks.md](docs/benchmarks.md), and every term is explained in
-> [docs/concepts.md](docs/concepts.md).
+An AI assistant that answers questions from a set of documents, cites its sources, and shows
+each step it takes and how long that step really took. The documents are kept apart from the
+code: today they're built from my resume, but they could be any collection, and invitee-only
+documents live in a separate private repo.
 
-A fast, intelligent, transparent AI assistant for my portfolio site: the **Context Concierge** (the
-name is configurable, `ASSISTANT_NAME`). Visitors ask questions about me and my work; the
-Context Concierge answers from my own documents ([RAG](docs/concepts.md#rag)), cites its sources, can take
-actions through tools, and **shows its work**: you watch it think on the left and watch the backend
-act on the right, with real measured timings.
+## Why
 
-**Goals:** prove *speed* and *intelligence* of responses, at nearly $0 a month.
+To show these in a working system rather than describe them:
 
-## Progress
+- **An agent that's safe by construction.** The model can only propose actions; Go code decides
+  what runs, and the search engine itself keeps private documents from anonymous visitors. A
+  jailbroken model still can't do anything it isn't allowed to.
+- **Speed and cost that are measured, not claimed.** Every timing on screen is real, retrieval
+  is gated in CI, and the whole thing is designed to run for close to $0 a month.
+- **Answers that are checked, by a checker that's tested.** A second model judges every answer
+  against the passages it came from and flags unsupported claims. The judge is trusted only
+  because its verdicts agreed with my own blind labels (10 of 10 on the latest sample), and that
+  human review loop is repeatable with `make label`.
+- **Attacks tested before launch** *(planned next)*. An adversarial suite of jailbreaks,
+  system-prompt extraction, prompt injection hidden in documents, tool abuse and private-document
+  leaks, each with canary strings and an expected safe outcome.
+- **AI-assisted delivery under human review.** Built with an AI coding agent, test-first, with
+  every deviation from the plan and every review outcome recorded.
 
-| Milestone | Proves | Status |
-|---|---|---|
-| **M1 Risks retired** | cgo on Lambda, Go SSE streaming, CloudFront passthrough, Groq speed | ✅ 2026-11-01 |
-| **M2 Local end-to-end** | Full chat with thought stream and action cards on my laptop | ✅ 2026-11-02 |
-| **M3 Safe and smart** | Real models, judge, golden + adversarial evals passing | In progress: 6.0–6.3 done, 6.4 (adversarial) next |
-| **M4 Private deploy** | Running on AWS, reachable only by me | Not started (Phase 7) |
-| **M5 Public launch** | Invite-only features, logging, privacy, measured benchmarks | Not started (Phases 8–10) |
+## How it works
 
-**Measured so far** (method and every run in [docs/benchmarks.md](docs/benchmarks.md#results)):
+A Go service finds the most relevant passages with a C++ search engine (vector and keyword
+search combined), a hosted model answers from them (Groq, with Amazon Bedrock as a fallback), a
+second model checks the answer against its sources, and every step streams to the browser as it
+happens.
+
+The target architecture on AWS (local today; see [Status](#status)):
+
+```mermaid
+flowchart LR
+    B[Browser<br/>static site] -->|HTTPS| CF[CloudFront]
+    CF --> S3[(S3<br/>site files)]
+    CF -->|SSE| L[Go orchestrator<br/>AWS Lambda]
+    L -->|cgo| E[C++ compute engine<br/>vector + BM25 search]
+    L -->|HTTPS stream| G[Groq<br/>primary LLM]
+    L -.->|fallback on rate limit| BR[Amazon Bedrock<br/>Nova Lite]
+    L --> T[Tools<br/>availability, messages]
+    L --> RL[(DynamoDB<br/>rate limits)]
+    L -.->|after response| PG[(Neon Postgres<br/>logs, invites, evals)]
+    B -.->|invite-only login| CG[Cognito]
+```
+
+Retrieval runs in-process through cgo, so there's no network hop on the hot path, and nothing a
+visitor waits for touches the database. The full stack, model routing, request lifecycle and
+evaluation approach are in [architecture in detail](docs/architecture.md).
+
+## What you see
+
+```
+┌──────────────────────────────────┬──────────────────────────────────┐
+│  THOUGHT STREAM (terminal view)  │  ACTION CARDS                    │
+│                                  │                                  │
+│  > rewriting follow-up question  │  ┌────────────────────────────┐  │
+│  > retrieving: "go experience"   │  │ * Retrieval (C++)   0.4 ms │  │
+│  > 4 chunks, top score 0.82      │  └────────────────────────────┘  │
+│  > plan: answer + offer meeting  │  ┌────────────────────────────┐  │
+│  > calling check_availability    │  │ * check_availability  8 ms │  │
+│                                  │  └────────────────────────────┘  │
+│  Answer: ... [1] [2]             │  ┌────────────────────────────┐  │
+│                                  │  │ * Inference (Groq)         │  │
+│  [ suggested questions ]         │  │   TTFT 210 ms · 480 tok/s  │  │
+│  [ chat input              ⏎ ]   │  │   cached prompt: 1.9k tok  │  │
+│                                  │  │ + Judge: grounded          │  │
+│                                  │  └────────────────────────────┘  │
+└──────────────────────────────────┴──────────────────────────────────┘
+```
+
+- **Left — Thought stream:** a terminal-style view of the model's reasoning and the agent's steps,
+  streamed in real time over **[Server-Sent Events (SSE)](docs/concepts.md#sse)**, followed by the answer with numbered
+  citations.
+- **Right — Action cards:** one card per backend step (retrieval, each tool call, inference,
+  judge). A card lights up the instant Go starts the step and shows its **measured** duration when
+  it finishes. Numbers are always real, never mocked.
+- **Suggested questions:** chips for the most common questions. Their answers are generated,
+  judge-verified and stored at deploy time, so they appear instantly (`Inference: 0 ms
+  (pre-verified)`), a direct contrast with live answers.
+
+The left pane streams the model's reasoning and the answer with numbered citations. The right
+pane shows one card per backend step (retrieval, each tool call, inference, judge), each with its
+measured duration.
+
+## What's measured
+
+Laptop and AWS spike results so far; the method and every run are in
+[benchmarks](docs/benchmarks.md#results).
 
 | What | Result | Where |
 |---|---|---|
@@ -49,56 +105,31 @@ act on the right, with real measured timings.
 End-to-end targets in the [latency budget](docs/benchmarks.md#latency-budget-one-live-chat-turn-warm-lambda)
 (for example, first visible thought) are design targets until Phase 7 measures them on AWS.
 
-## What you see
+End-to-end targets, such as time to first visible thought, stay design targets until they're
+measured on AWS.
 
-```
-┌──────────────────────────────────┬──────────────────────────────────┐
-│  THOUGHT STREAM (terminal view)  │  ACTION CARDS                    │
-│                                  │                                  │
-│  > rewriting follow-up question  │  ┌────────────────────────────┐  │
-│  > retrieving: "go experience"   │  │ ● Retrieval (C++)   0.4 ms │  │
-│  > 4 chunks, top score 0.82      │  └────────────────────────────┘  │
-│  > plan: answer + offer meeting  │  ┌────────────────────────────┐  │
-│  > calling check_availability    │  │ ● check_availability  8 ms │  │
-│                                  │  └────────────────────────────┘  │
-│  Answer: ... [1] [2]             │  ┌────────────────────────────┐  │
-│                                  │  │ ● Inference (Groq)         │  │
-│  [ suggested questions ]         │  │   TTFT 210 ms · 480 tok/s  │  │
-│  [ chat input              ⏎ ]   │  │   cached prompt: 1.9k tok  │  │
-│                                  │  │ ✓ Judge: grounded          │  │
-│                                  │  └────────────────────────────┘  │
-└──────────────────────────────────┴──────────────────────────────────┘
-```
+## Status
 
-- **Left — Thought stream:** a terminal-style view of the model's reasoning and the agent's steps,
-  streamed in real time over **[Server-Sent Events (SSE)](docs/concepts.md#sse)**, followed by the answer with numbered
-  citations.
-- **Right — Action cards:** one card per backend step (retrieval, each tool call, inference,
-  judge). A card lights up the instant Go starts the step and shows its **measured** duration when
-  it finishes. Numbers are always real, never mocked.
-- **Suggested questions:** chips for the most common questions. Their answers are generated,
-  judge-verified and stored at deploy time, so they appear instantly (`Inference: 0 ms
-  (pre-verified)`), a direct contrast with live answers.
+**Paused on 2026-11-16 while the website that will host it launches**
+([design §15](docs/design.md#15-running-as-a-feature-of-cferrantedev)). It's built and evaluated
+locally but not deployed yet. Next is the adversarial test suite, then a private deploy on AWS.
 
-Both panes are driven by a single SSE stream with typed events:
-
-| Event | Drives | Payload |
+| Milestone | Proves | Status |
 |---|---|---|
-| `thought` | left pane | reasoning / step text |
-| `token` | left pane (answer) | answer text chunk |
-| `citation` | both | chunk id, source title, link |
-| `step_start` | right pane | step id, kind, label |
-| `step_end` | right pane | step id, duration, provider, token counts, status |
-| `judge` | right pane | verdict, unsupported claims |
-| `done` / `error` | both | totals / error code |
+| **M1 Risks retired** | cgo on Lambda, Go SSE streaming, CloudFront passthrough, Groq speed | ✅ 2026-11-01 |
+| **M2 Local end-to-end** | Full chat with thought stream and action cards on my laptop | ✅ 2026-11-02 |
+| **M3 Safe and smart** | Real models, judge, golden + adversarial evals passing | In progress: 6.0–6.3 done, 6.4 (adversarial) next |
+| **M4 Private deploy** | Running on AWS, reachable only by me | Not started (Phase 7) |
+| **M5 Public launch** | Invite-only features, logging, privacy, measured benchmarks | Not started (Phases 8–10) |
 
-## Architecture
+## Stack
 
-Stack, model routing, request lifecycle, performance, retrieval, invitations, evaluation,
-privacy, testing, cost, repository layout, open decisions and known risks are in
-[architecture in detail](docs/architecture.md).
+Built: Go · C++ retrieval engine via cgo · Groq (gpt-oss) with an Amazon Bedrock fallback ·
+Titan embeddings · plain HTML and JS with Tailwind CSS. Planned for the deploy: AWS Lambda,
+CloudFront, Cognito, DynamoDB, Neon Postgres and OpenTofu. No LLM framework: every provider sits
+behind one small Go interface.
 
-## Local development
+## Try it locally
 
 Requires Go, a C++17 compiler, CMake and [Ollama](https://ollama.com) running natively.
 `make tools` fetches pinned, checksum-verified copies of the
@@ -117,3 +148,17 @@ make help                    # every target, including the live smokes and evals
 
 On a CPU, Ollama answers take 30–100 s. For realistic speed, `CHAT_PROVIDER=groq` uses Groq
 with the key read from SSM through your AWS SSO session (`aws sso login` first).
+
+## How it was built
+
+Spec first, then a step-by-step plan, then code, written test-first with
+[Claude Code](https://claude.com/claude-code) as the coding agent. CI blocks merges that break
+the rules, and every deviation and review outcome is logged in the plan.
+
+| Read this | For |
+|---|---|
+| [Architecture in detail](docs/architecture.md) | Stack, model routing, performance, retrieval, evaluation, testing, cost and risks |
+| [Design spec](docs/design.md) | Components, streaming protocol, model layer, tools and authorization, data model |
+| [Plan](docs/plan.md) | Each step, the test that had to fail first, deviations, review outcomes and spike findings |
+| [Benchmarks](docs/benchmarks.md) | Targets, measured results and the method behind each |
+| [Concepts](docs/concepts.md) | Every term used here, explained |
